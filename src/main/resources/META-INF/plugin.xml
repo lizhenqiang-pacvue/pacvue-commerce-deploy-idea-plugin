@@ -1,0 +1,20 @@
+<idea-plugin>
+    <id>com.pacvue.commerce.deploy</id>
+    <name>Pacvue Commerce Deploy</name>
+    <vendor>Pacvue</vendor>
+
+    <description><![CDATA[
+        Visual JetBrains IDE tool window for triggering Pacvue Commerce GitHub Actions deployments.
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends optional="true">Git4Idea</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow
+            id="Pacvue Deploy"
+            anchor="right"
+            icon="/icons/pacvueDeploy.svg"
+            factoryClass="com.pacvue.deploy.PacvueDeployToolWindowFactory" />
+    </extensions>
+</idea-plugin>

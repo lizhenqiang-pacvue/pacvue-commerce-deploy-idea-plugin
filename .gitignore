@@ -1,0 +1,10 @@
+.gradle/
+build/
+.idea/
+.intellijPlatform/
+out/
+*.iml
+*-progress.md
+*.zip
+.DS_Store
+.claude/
