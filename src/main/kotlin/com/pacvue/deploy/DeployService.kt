@@ -7,6 +7,7 @@ import com.google.gson.JsonParser
 import com.intellij.openapi.project.Project
 import java.io.File
 import java.nio.file.Files
+import java.security.MessageDigest
 
 data class WorkflowInput(
     val required: Boolean = false,
@@ -74,7 +75,36 @@ data class DeployIssueResult(
     val ok: Boolean,
     val issueUrl: String? = null,
     val error: String? = null,
+    val warning: String? = null,
+    val deduplicated: Boolean = false,
 )
+
+data class DeployFailureDiagnosis(
+    val category: String,
+    val summary: String,
+    val triageRoute: String,
+    val recommendedAction: String,
+    val labels: List<String> = emptyList(),
+)
+
+enum class EnvironmentCheckStatus {
+    OK,
+    WARNING,
+    ERROR,
+}
+
+data class EnvironmentCheckResult(
+    val label: String,
+    val status: EnvironmentCheckStatus,
+    val message: String,
+)
+
+data class EnvironmentCheckReport(
+    val checks: List<EnvironmentCheckResult> = emptyList(),
+) {
+    val hasErrors: Boolean
+        get() = checks.any { it.status == EnvironmentCheckStatus.ERROR }
+}
 
 class DeployService(private val project: Project) {
     private val gson = Gson()
@@ -109,6 +139,117 @@ class DeployService(private val project: Project) {
         val script = findDeployScript()
         val result = runProcess("node", listOf(script.absolutePath, "--list-workflows-json"), projectRoot)
         return gson.fromJson(result.stdout, WorkflowMetadataResponse::class.java)
+    }
+
+    fun runEnvironmentChecks(): EnvironmentCheckReport {
+        val checks = mutableListOf<EnvironmentCheckResult>()
+        val root = projectRoot
+
+        checks.add(
+            if (root.exists() && root.isDirectory) {
+                EnvironmentCheckResult("Project", EnvironmentCheckStatus.OK, root.absolutePath)
+            } else {
+                EnvironmentCheckResult("Project", EnvironmentCheckStatus.ERROR, "Project root does not exist: ${root.absolutePath}")
+            },
+        )
+
+        val gitVersion = runProcessForCheck("git", listOf("--version"), root)
+        if (gitVersion?.status == 0) {
+            checks.add(EnvironmentCheckResult("Git", EnvironmentCheckStatus.OK, gitVersion.stdout.trim().ifBlank { "git is available." }))
+
+            val insideWorkTree = runProcessForCheck("git", listOf("rev-parse", "--is-inside-work-tree"), root)
+            checks.add(
+                if (insideWorkTree?.status == 0 && insideWorkTree.stdout.trim() == "true") {
+                    EnvironmentCheckResult("Git repository", EnvironmentCheckStatus.OK, "Current project is a Git working tree.")
+                } else {
+                    EnvironmentCheckResult("Git repository", EnvironmentCheckStatus.ERROR, "Current project is not a Git working tree.")
+                },
+            )
+
+            val remote = runProcessForCheck("git", listOf("config", "--get", "remote.origin.url"), root)
+            checks.add(
+                if (remote?.status == 0 && remote.stdout.trim().isNotBlank()) {
+                    EnvironmentCheckResult("Git origin", EnvironmentCheckStatus.OK, remote.stdout.trim())
+                } else {
+                    EnvironmentCheckResult("Git origin", EnvironmentCheckStatus.WARNING, "remote.origin.url is not configured.")
+                },
+            )
+        } else {
+            checks.add(
+                EnvironmentCheckResult(
+                    "Git",
+                    EnvironmentCheckStatus.ERROR,
+                    "git is required. Install Git or expose it through PATH / ${ExecutableResolver.GIT_PATH_ENV}.",
+                ),
+            )
+        }
+
+        val workflowsDir = File(root, ".github/workflows")
+        val workflowFiles = workflowsDir.listFiles { file -> isWorkflowFile(file) }.orEmpty()
+        checks.add(
+            when {
+                !workflowsDir.exists() || !workflowsDir.isDirectory -> EnvironmentCheckResult(
+                    "GitHub workflows",
+                    EnvironmentCheckStatus.ERROR,
+                    "Missing .github/workflows directory.",
+                )
+
+                workflowFiles.isEmpty() -> EnvironmentCheckResult(
+                    "GitHub workflows",
+                    EnvironmentCheckStatus.ERROR,
+                    "No .yml or .yaml workflow files were found under .github/workflows.",
+                )
+
+                else -> EnvironmentCheckResult(
+                    "GitHub workflows",
+                    EnvironmentCheckStatus.OK,
+                    "Found ${workflowFiles.size} workflow file(s).",
+                )
+            },
+        )
+
+        val nodeVersion = runProcessForCheck("node", listOf("--version"), root)
+        if (nodeVersion?.status == 0) {
+            val versionText = nodeVersion.stdout.trim().lineSequence().firstOrNull().orEmpty()
+            val majorVersion = parseNodeMajorVersion(versionText)
+            checks.add(
+                when {
+                    majorVersion == null -> EnvironmentCheckResult("Node.js", EnvironmentCheckStatus.WARNING, "Node.js is available, but version could not be parsed: $versionText")
+                    majorVersion < 16 -> EnvironmentCheckResult("Node.js", EnvironmentCheckStatus.ERROR, "Node.js 16+ is required. Current version: $versionText")
+                    else -> EnvironmentCheckResult("Node.js", EnvironmentCheckStatus.OK, versionText)
+                },
+            )
+        } else {
+            checks.add(EnvironmentCheckResult("Node.js", EnvironmentCheckStatus.ERROR, "Node.js 16+ is required to run the bundled deploy script."))
+        }
+
+        val ghVersion = runProcessForCheck("gh", listOf("--version"), root)
+        if (ghVersion?.status == 0) {
+            checks.add(EnvironmentCheckResult("GitHub CLI", EnvironmentCheckStatus.OK, ghVersion.stdout.lineSequence().firstOrNull().orEmpty().ifBlank { "gh is available." }))
+
+            val authStatus = runProcessForCheck("gh", listOf("auth", "status"), root)
+            checks.add(
+                if (authStatus?.status == 0) {
+                    EnvironmentCheckResult("GitHub auth", EnvironmentCheckStatus.OK, "gh auth status succeeded.")
+                } else {
+                    EnvironmentCheckResult(
+                        "GitHub auth",
+                        EnvironmentCheckStatus.ERROR,
+                        previewCommandOutput(authStatus?.stdout.orEmpty(), authStatus?.stderr.orEmpty(), "Run gh auth login before deploying."),
+                    )
+                },
+            )
+        } else {
+            checks.add(
+                EnvironmentCheckResult(
+                    "GitHub CLI",
+                    EnvironmentCheckStatus.ERROR,
+                    "gh is required to trigger, poll, open, and cancel GitHub Actions runs. Install gh and run gh auth login.",
+                ),
+            )
+        }
+
+        return EnvironmentCheckReport(checks)
     }
 
     fun runDeploy(branch: String, workflow: String, inputs: Map<String, String>, dispatch: Boolean): DeployCommandResult {
@@ -198,8 +339,15 @@ class DeployService(private val project: Project) {
             ?.trim()
             ?.takeIf { it.isNotBlank() }
             ?: DEFAULT_ISSUE_REPO
-        val title = buildDeployFailureIssueTitle(request)
-        val body = trimIssueBody(buildDeployFailureIssueBody(request))
+        val diagnosis = diagnoseDeployFailure(request)
+        val fingerprint = buildDeployFailureFingerprint(request, diagnosis)
+        val duplicateIssue = findOpenDuplicateIssue(issueRepoSlug, fingerprint)
+        if (duplicateIssue != null) {
+            return appendDuplicateIssueComment(issueRepoSlug, duplicateIssue, request, diagnosis, fingerprint)
+        }
+
+        val title = buildDeployFailureIssueTitle(request, diagnosis)
+        val body = trimIssueBody(buildDeployFailureIssueBody(request, diagnosis, fingerprint))
         val bodyFile = Files.createTempFile("pacvue-deploy-issue-", ".md").toFile()
 
         return try {
@@ -210,12 +358,15 @@ class DeployService(private val project: Project) {
                 projectRoot,
             )
             if (result.status == 0) {
+                val issueUrl = result.stdout
+                    .lineSequence()
+                    .map { it.trim() }
+                    .firstOrNull { it.startsWith("http://") || it.startsWith("https://") }
+                val labelWarning = addIssueLabels(issueRepoSlug, issueUrl, diagnosis.labels)
                 DeployIssueResult(
                     ok = true,
-                    issueUrl = result.stdout
-                        .lineSequence()
-                        .map { it.trim() }
-                        .firstOrNull { it.startsWith("http://") || it.startsWith("https://") },
+                    issueUrl = issueUrl,
+                    warning = labelWarning,
                 )
             } else {
                 DeployIssueResult(ok = false, error = previewCommandOutput(result.stdout, result.stderr, "Failed to create deploy failure issue."))
@@ -224,6 +375,92 @@ class DeployService(private val project: Project) {
             DeployIssueResult(ok = false, error = error.message ?: "Failed to create deploy failure issue.")
         } finally {
             bodyFile.delete()
+        }
+    }
+
+    private fun findOpenDuplicateIssue(issueRepoSlug: String, fingerprint: String): GithubIssueSummary? {
+        val result = runCatching {
+            runProcess(
+                "gh",
+                listOf(
+                    "issue",
+                    "list",
+                    "--repo",
+                    issueRepoSlug,
+                    "--state",
+                    "open",
+                    "--search",
+                    fingerprint,
+                    "--json",
+                    "number,title,url",
+                    "--limit",
+                    "5",
+                ),
+                projectRoot,
+            )
+        }.getOrNull() ?: return null
+
+        if (result.status != 0 || result.stdout.isBlank()) return null
+
+        return runCatching {
+            gson.fromJson(result.stdout, Array<GithubIssueSummary>::class.java)
+                .firstOrNull { it.url.isNotBlank() || it.number != null }
+        }.getOrNull()
+    }
+
+    private fun appendDuplicateIssueComment(
+        issueRepoSlug: String,
+        issue: GithubIssueSummary,
+        request: DeployFailureIssueRequest,
+        diagnosis: DeployFailureDiagnosis,
+        fingerprint: String,
+    ): DeployIssueResult {
+        val bodyFile = Files.createTempFile("pacvue-deploy-duplicate-", ".md").toFile()
+        return try {
+            bodyFile.writeText(trimIssueBody(buildDeployFailureIssueComment(request, diagnosis, fingerprint)))
+            val issueSelector = issue.url.takeIf { it.isNotBlank() } ?: issue.number?.toString().orEmpty()
+            val result = runProcess(
+                "gh",
+                listOf("issue", "comment", issueSelector, "--repo", issueRepoSlug, "--body-file", bodyFile.absolutePath),
+                projectRoot,
+            )
+            if (result.status == 0) {
+                DeployIssueResult(ok = true, issueUrl = issue.url, deduplicated = true)
+            } else {
+                DeployIssueResult(
+                    ok = false,
+                    issueUrl = issue.url,
+                    error = previewCommandOutput(result.stdout, result.stderr, "Duplicate issue found, but failed to append comment."),
+                    deduplicated = true,
+                )
+            }
+        } catch (error: Throwable) {
+            DeployIssueResult(
+                ok = false,
+                issueUrl = issue.url,
+                error = error.message ?: "Duplicate issue found, but failed to append comment.",
+                deduplicated = true,
+            )
+        } finally {
+            bodyFile.delete()
+        }
+    }
+
+    private fun addIssueLabels(issueRepoSlug: String, issueUrl: String?, labels: List<String>): String? {
+        if (issueUrl.isNullOrBlank() || labels.isEmpty()) return null
+
+        val result = runCatching {
+            runProcess(
+                "gh",
+                listOf("issue", "edit", issueUrl, "--repo", issueRepoSlug, "--add-label", labels.joinToString(",")),
+                projectRoot,
+            )
+        }.getOrNull() ?: return "Issue was created, but labels could not be added."
+
+        return if (result.status == 0) {
+            null
+        } else {
+            previewCommandOutput(result.stdout, result.stderr, "Issue was created, but labels could not be added.")
         }
     }
 
@@ -277,11 +514,28 @@ class DeployService(private val project: Project) {
         return ProcessResult(status, stdout, stderr)
     }
 
+    private fun runProcessForCheck(command: String, args: List<String>, cwd: File): ProcessResult? {
+        return runCatching { runProcess(command, args, cwd) }.getOrNull()
+    }
+
+    private fun isWorkflowFile(file: File): Boolean {
+        return file.isFile &&
+            (file.extension.equals("yml", ignoreCase = true) || file.extension.equals("yaml", ignoreCase = true))
+    }
+
     companion object {
         private const val DEFAULT_ISSUE_REPO = "lizhenqiang-pacvue/pacvue-commerce-deploy-idea-plugin"
         private const val ISSUE_BODY_MAX_CHARS = 60000
         private const val GITHUB_FILE_MAX_CHARS = 6000
         private const val GITHUB_SNAPSHOT_MAX_FILES = 12
+
+        fun parseNodeMajorVersion(versionOutput: String): Int? {
+            return Regex("""v?(\d+)""")
+                .find(versionOutput.trim())
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.toIntOrNull()
+        }
 
         fun parseGithubRepoId(remoteUrl: String): String? {
             val normalized = remoteUrl.trim().removeSuffix(".git")
@@ -304,19 +558,255 @@ class DeployService(private val project: Project) {
 
             return null
         }
-    }
 
-    private fun buildDeployFailureIssueTitle(request: DeployFailureIssueRequest): String {
-        val workflowName = request.workflowName.ifBlank { request.workflow.ifBlank { "workflow" } }
-        return if (request.failureType == "trigger") {
-            "[auto-triage] Deploy trigger failed: $workflowName @ ${request.targetBranch}"
-        } else {
-            val runSuffix = request.run?.databaseId?.let { " (run #$it)" }.orEmpty()
-            "[auto-triage] Deploy failed: $workflowName @ ${request.targetBranch}$runSuffix"
+        fun diagnoseDeployFailure(request: DeployFailureIssueRequest): DeployFailureDiagnosis {
+            if (request.failureType == "run") {
+                val conclusion = request.run?.conclusion?.takeIf { it.isNotBlank() } ?: "unknown"
+                val failedJobs = request.jobsSummary.takeIf { it.isNotEmpty() }
+                    ?.joinToString(", ") { it.name }
+                    .orEmpty()
+                return failureDiagnosis(
+                    category = "workflow_failed",
+                    summary = if (failedJobs.isBlank()) {
+                        "GitHub Actions workflow completed with conclusion: $conclusion."
+                    } else {
+                        "GitHub Actions workflow completed with conclusion: $conclusion. Failed jobs: $failedJobs."
+                    },
+                    triageRoute = "workflow_runtime",
+                    recommendedAction = "Open the run, inspect failed jobs and steps, then fix the workflow, build command, or project runtime error.",
+                )
+            }
+
+            val parsed = request.parsed
+            val errorText = listOf(
+                request.errorMessage.orEmpty(),
+                parsed?.get("reason").asNonBlankStringOrNull().orEmpty(),
+                parsed?.get("commandPreview").asNonBlankStringOrNull().orEmpty(),
+                parsed?.get("dispatch")
+                    .asJsonObjectOrNull()
+                    ?.get("stderr")
+                    .asNonBlankStringOrNull()
+                    .orEmpty(),
+                parsed?.get("dispatch")
+                    .asJsonObjectOrNull()
+                    ?.get("stdout")
+                    .asNonBlankStringOrNull()
+                    .orEmpty(),
+            )
+                .filter { it.isNotBlank() }
+                .joinToString("\n")
+            val normalized = errorText.lowercase()
+
+            val missingRequiredInputs = parsed?.get("missingRequiredInputs")
+                ?.takeIf { it.isJsonArray }
+                ?.asJsonArray
+                ?.takeIf { it.size() > 0 }
+            if (missingRequiredInputs != null) {
+                return failureDiagnosis(
+                    category = "invalid_inputs",
+                    summary = "Deploy inputs are missing required values: $missingRequiredInputs.",
+                    triageRoute = "deploy_input",
+                    recommendedAction = "Fill required workflow inputs or update workflow defaults before running deploy again.",
+                )
+            }
+
+            if (
+                normalized.contains("workflow") &&
+                (
+                    normalized.contains("was not found") ||
+                        normalized.contains("no workflow") ||
+                        normalized.contains("multiple matching workflows") ||
+                        normalized.contains("does not use workflow_dispatch")
+                    )
+            ) {
+                return failureDiagnosis(
+                    category = "workflow_not_found",
+                    summary = "The selected workflow is missing, ambiguous, or does not support workflow_dispatch.",
+                    triageRoute = "project_config",
+                    recommendedAction = "Check .github/workflows in the Commerce project and ensure the selected workflow exists and supports workflow_dispatch.",
+                )
+            }
+
+            if (
+                normalized.contains("remote branch") ||
+                normalized.contains("not found on origin") ||
+                normalized.contains("git is required") ||
+                normalized.contains("git 命令") ||
+                normalized.contains("missing .github") ||
+                normalized.contains("no .yml") ||
+                normalized.contains("no .yaml")
+            ) {
+                return failureDiagnosis(
+                    category = "invalid_project_config",
+                    summary = "The current project Git or GitHub workflow configuration does not meet deploy requirements.",
+                    triageRoute = "project_config",
+                    recommendedAction = "Ask the project owner to fix Git remote, target branch, or .github/workflows configuration.",
+                )
+            }
+
+            if (
+                normalized.contains("未检测到 github cli") ||
+                normalized.contains("github cli") && (normalized.contains("install") || normalized.contains("安装"))
+            ) {
+                return failureDiagnosis(
+                    category = "github_cli_unavailable",
+                    summary = "GitHub CLI is not installed or not visible to the IDE process.",
+                    triageRoute = "github_cli",
+                    recommendedAction = "Install GitHub CLI, run gh auth login, then fully restart the IDE so the plugin can read the updated PATH.",
+                )
+            }
+
+            if (
+                normalized.contains("github cli") ||
+                normalized.contains("gh auth") ||
+                normalized.contains("gh:") ||
+                normalized.contains("authentication") ||
+                normalized.contains("not authenticated") ||
+                normalized.contains("permission") ||
+                normalized.contains("forbidden") ||
+                normalized.contains("resource not accessible") ||
+                normalized.contains("http 401") ||
+                normalized.contains("http 403")
+            ) {
+                return failureDiagnosis(
+                    category = "github_auth_failed",
+                    summary = "GitHub CLI authentication or permissions prevented the deploy operation.",
+                    triageRoute = "github_auth",
+                    recommendedAction = "Run gh auth status / gh auth login and confirm repo + workflow permissions and organization SSO authorization.",
+                )
+            }
+
+            if (
+                normalized.contains("no github actions run was found") ||
+                normalized.contains("workflow run returned successfully") ||
+                normalized.contains("verified\":false") ||
+                normalized.contains("dispatch error")
+            ) {
+                return failureDiagnosis(
+                    category = "dispatch_failed",
+                    summary = "The workflow dispatch did not produce a verifiable GitHub Actions run.",
+                    triageRoute = "github_dispatch",
+                    recommendedAction = "Check GitHub Actions dispatch permissions, workflow ref, branch filters, and whether the run was delayed or rejected.",
+                )
+            }
+
+            if (parsed == null) {
+                return failureDiagnosis(
+                    category = "script_parse_failed",
+                    summary = "Deploy script output could not be parsed as structured JSON.",
+                    triageRoute = "plugin_code",
+                    recommendedAction = "Check the IDEA plugin and deploy-to-test.js output parsing path; this is likely a plugin/script integration issue.",
+                )
+            }
+
+            return failureDiagnosis(
+                category = "unknown",
+                summary = "Deploy failed, but the plugin could not classify the failure with current rules.",
+                triageRoute = "manual_triage",
+                recommendedAction = "Review the captured error, command, workflow file, and project .github snapshot.",
+            )
+        }
+
+        private fun failureDiagnosis(
+            category: String,
+            summary: String,
+            triageRoute: String,
+            recommendedAction: String,
+        ): DeployFailureDiagnosis {
+            return DeployFailureDiagnosis(
+                category = category,
+                summary = summary,
+                triageRoute = triageRoute,
+                recommendedAction = recommendedAction,
+                labels = listOf("auto-triage", "deploy-failure", category),
+            )
+        }
+
+        fun buildDeployFailureFingerprint(
+            request: DeployFailureIssueRequest,
+            diagnosis: DeployFailureDiagnosis = diagnoseDeployFailure(request),
+        ): String {
+            val rawFingerprint = listOf(
+                "pacvue-deploy-failure",
+                diagnosis.category,
+                request.failureType,
+                request.commerceRepo,
+                request.workflow,
+                request.targetBranch,
+                getInputValue(request.inputs, "ProjectName"),
+                normalizeFingerprintText(buildFingerprintErrorSummary(request, diagnosis)),
+            )
+                .joinToString("|")
+
+            return MessageDigest
+                .getInstance("SHA-256")
+                .digest(rawFingerprint.toByteArray(Charsets.UTF_8))
+                .joinToString("") { "%02x".format(it) }
+        }
+
+        private fun getInputValue(inputs: Map<String, String>, key: String): String {
+            return inputs.entries
+                .firstOrNull { it.key.equals(key, ignoreCase = true) }
+                ?.value
+                .orEmpty()
+        }
+
+        private fun buildFingerprintErrorSummary(
+            request: DeployFailureIssueRequest,
+            diagnosis: DeployFailureDiagnosis,
+        ): String {
+            val failedJobs = request.jobsSummary.joinToString("\n") { job ->
+                listOf(
+                    job.name,
+                    job.conclusion.orEmpty(),
+                    job.failedSteps.joinToString(","),
+                )
+                    .filter { it.isNotBlank() }
+                    .joinToString(":")
+            }
+            val parsed = request.parsed
+            return listOf(
+                diagnosis.summary,
+                request.errorMessage.orEmpty(),
+                failedJobs,
+                parsed?.get("reason").asNonBlankStringOrNull().orEmpty(),
+                parsed?.get("dispatch")
+                    .asJsonObjectOrNull()
+                    ?.get("stderr")
+                    .asNonBlankStringOrNull()
+                    .orEmpty(),
+            )
+                .filter { it.isNotBlank() }
+                .joinToString("\n")
+        }
+
+        private fun normalizeFingerprintText(text: String): String {
+            return text
+                .lowercase()
+                .replace(Regex("""https?://\S+"""), "<url>")
+                .replace(Regex("""run #?\d+"""), "run <id>")
+                .replace(Regex("""\b\d{6,}\b"""), "<number>")
+                .replace(Regex("""\s+"""), " ")
+                .trim()
+                .take(600)
         }
     }
 
-    private fun buildDeployFailureIssueBody(request: DeployFailureIssueRequest): String {
+    private fun buildDeployFailureIssueTitle(request: DeployFailureIssueRequest, diagnosis: DeployFailureDiagnosis): String {
+        val workflowName = request.workflowName.ifBlank { request.workflow.ifBlank { "workflow" } }
+        return if (request.failureType == "trigger") {
+            "[auto-triage][${diagnosis.category}] Deploy trigger failed: $workflowName @ ${request.targetBranch}"
+        } else {
+            val runSuffix = request.run?.databaseId?.let { " (run #$it)" }.orEmpty()
+            "[auto-triage][${diagnosis.category}] Deploy failed: $workflowName @ ${request.targetBranch}$runSuffix"
+        }
+    }
+
+    private fun buildDeployFailureIssueBody(
+        request: DeployFailureIssueRequest,
+        diagnosis: DeployFailureDiagnosis,
+        fingerprint: String,
+    ): String {
         val githubSnapshot = readGithubSnapshot()
         val runUrl = request.run?.url.orEmpty()
         val conclusion = request.run?.conclusion.orEmpty()
@@ -339,6 +829,12 @@ class DeployService(private val project: Project) {
             "runId" to request.run?.databaseId,
             "runUrl" to runUrl.ifBlank { null },
             "conclusion" to conclusion.ifBlank { null },
+            "failureCategory" to diagnosis.category,
+            "triageRoute" to diagnosis.triageRoute,
+            "diagnosisSummary" to diagnosis.summary,
+            "recommendedAction" to diagnosis.recommendedAction,
+            "dedupeFingerprint" to fingerprint,
+            "labels" to diagnosis.labels,
             "command" to request.command,
             "errorMessage" to errorMessage.ifBlank { null },
             "reporter" to "pacvue-commerce-deploy-idea-plugin",
@@ -354,12 +850,25 @@ class DeployService(private val project: Project) {
         )
 
         return listOf(
+            "<!-- pacvue-deploy-fingerprint: $fingerprint -->",
+            "",
             "## Summary",
             if (request.failureType == "trigger") {
                 "Pacvue Deploy failed to trigger the GitHub Actions workflow."
             } else {
                 "Pacvue Deploy workflow run completed with a non-success result."
             },
+            "",
+            "## Diagnosis",
+            "",
+            "| Field | Value |",
+            "| --- | --- |",
+            "| Failure category | `${escapeTableValue(diagnosis.category)}` |",
+            "| Triage route | `${escapeTableValue(diagnosis.triageRoute)}` |",
+            "| Summary | ${escapeTableValue(diagnosis.summary)} |",
+            "| Recommended action | ${escapeTableValue(diagnosis.recommendedAction)} |",
+            "| Dedupe fingerprint | `$fingerprint` |",
+            "| Labels | `${escapeTableValue(diagnosis.labels.joinToString(", "))}` |",
             "",
             "## Context",
             "",
@@ -400,6 +909,59 @@ class DeployService(private val project: Project) {
             "```",
             "",
             "_Auto-created by Pacvue Commerce Deploy IDEA plugin. Label or assign for agent triage._",
+        )
+            .filterNotNull()
+            .joinToString("\n")
+    }
+
+    private fun buildDeployFailureIssueComment(
+        request: DeployFailureIssueRequest,
+        diagnosis: DeployFailureDiagnosis,
+        fingerprint: String,
+    ): String {
+        val runUrl = request.run?.url.orEmpty()
+        val conclusion = request.run?.conclusion.orEmpty()
+        val failedJobsBlock = if (request.jobsSummary.isNotEmpty()) {
+            request.jobsSummary.joinToString("\n") { job ->
+                val failedSteps = job.failedSteps.takeIf { it.isNotEmpty() }?.joinToString(", ")
+                "- **${job.name}** (${job.conclusion ?: "unknown"})${failedSteps?.let { ": $it" }.orEmpty()}"
+            }
+        } else {
+            "_No failed job details were available from GitHub Actions CLI._"
+        }
+
+        return listOf(
+            "<!-- pacvue-deploy-fingerprint: $fingerprint -->",
+            "",
+            "## Duplicate deploy failure occurrence",
+            "",
+            "A new failure matched this open issue by dedupe fingerprint.",
+            "",
+            "| Field | Value |",
+            "| --- | --- |",
+            "| Reported at | `${java.time.Instant.now()}` |",
+            "| Failure category | `${escapeTableValue(diagnosis.category)}` |",
+            "| Triage route | `${escapeTableValue(diagnosis.triageRoute)}` |",
+            "| Workflow | `${escapeTableValue(request.workflowName.ifBlank { request.workflow })}` |",
+            "| Workflow file | `${escapeTableValue(request.workflow.ifBlank { "n/a" })}` |",
+            "| Target branch | `${escapeTableValue(request.targetBranch.ifBlank { "n/a" })}` |",
+            if (runUrl.isNotBlank()) "| Run URL | $runUrl |" else "| Run URL | n/a |",
+            if (conclusion.isNotBlank()) "| Conclusion | `${escapeTableValue(conclusion)}` |" else null,
+            "| Dedupe fingerprint | `$fingerprint` |",
+            "",
+            "## Inputs",
+            "",
+            formatIssueInputs(request.inputs),
+            "",
+            "## Error",
+            "",
+            "```text",
+            request.errorMessage.orEmpty().ifBlank { "(no error message captured)" },
+            "```",
+            "",
+            "## Failed jobs",
+            "",
+            failedJobsBlock,
         )
             .filterNotNull()
             .joinToString("\n")
@@ -499,6 +1061,12 @@ class DeployService(private val project: Project) {
         val content: String? = null,
         val truncated: Boolean = false,
         val skipped: String? = null,
+    )
+
+    private data class GithubIssueSummary(
+        val number: Int? = null,
+        val title: String = "",
+        val url: String = "",
     )
 }
 

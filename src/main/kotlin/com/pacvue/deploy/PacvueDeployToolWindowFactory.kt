@@ -126,11 +126,24 @@ private class PacvueDeployPanel(project: Project) : JPanel(BorderLayout()) {
         setBusy(true)
         outputArea.text = "Loading branches and workflows..."
         ApplicationManager.getApplication().executeOnPooledThread {
+            val environmentReport = runCatching { service.runEnvironmentChecks() }
+                .getOrElse { error ->
+                    EnvironmentCheckReport(
+                        listOf(
+                            EnvironmentCheckResult(
+                                "Environment check",
+                                EnvironmentCheckStatus.ERROR,
+                                error.message ?: "Failed to run environment checks.",
+                            ),
+                        ),
+                    )
+                }
             val result = runCatching {
                 val currentBranch = service.getCurrentBranch()
                 val branchOptions = service.getBranchOptions(currentBranch)
                 val workflowMetadata = service.getWorkflowMetadata()
                 DeployPanelState(
+                    environmentReport = environmentReport,
                     repoId = service.getRepoId(),
                     currentBranch = currentBranch,
                     branchOptions = branchOptions,
@@ -154,10 +167,16 @@ private class PacvueDeployPanel(project: Project) : JPanel(BorderLayout()) {
                         }
                         renderInputs(getSelectedWorkflow())
                         renderHistory()
-                        outputArea.text = if (workflows.isEmpty()) "No workflow_dispatch workflows were found." else "Ready."
+                        outputArea.text = formatRefreshOutput(
+                            state.environmentReport,
+                            if (workflows.isEmpty()) "No workflow_dispatch workflows were found." else "Ready.",
+                        )
                     }
                     .onFailure { error ->
-                        outputArea.text = error.message ?: "Failed to load deploy metadata."
+                        outputArea.text = formatRefreshOutput(
+                            environmentReport,
+                            "Failed to load deploy metadata: ${error.message ?: "Unknown error."}",
+                        )
                     }
                 setBusy(false)
             }
@@ -772,7 +791,11 @@ private class PacvueDeployPanel(project: Project) : JPanel(BorderLayout()) {
 
     private fun appendIssueResult(result: DeployIssueResult) {
         if (result.ok) {
-            outputArea.append("\nDeploy failure reported as GitHub issue.${result.issueUrl?.let { "\nIssue URL: $it" }.orEmpty()}")
+            outputArea.append(
+                "\n${if (result.deduplicated) "Duplicate deploy failure appended to existing GitHub issue." else "Deploy failure reported as GitHub issue."}" +
+                    result.issueUrl?.let { "\nIssue URL: $it" }.orEmpty() +
+                    result.warning?.let { "\nIssue label warning: $it" }.orEmpty(),
+            )
             return
         }
 
@@ -783,6 +806,35 @@ private class PacvueDeployPanel(project: Project) : JPanel(BorderLayout()) {
         val parsedMessage = formatParsedMessage(result.parsed)
         val rawOutput = listOf(result.stderr, result.stdout).filter { it.isNotBlank() }.joinToString("\n\n").trim()
         return parsedMessage.ifBlank { rawOutput }.ifBlank { "Deploy command failed." }
+    }
+
+    private fun formatRefreshOutput(environmentReport: EnvironmentCheckReport, statusMessage: String): String {
+        return listOf(
+            formatEnvironmentReport(environmentReport),
+            if (environmentReport.hasErrors) "Fix [ERROR] items before running a deploy." else "",
+            statusMessage,
+        )
+            .filter { it.isNotBlank() }
+            .joinToString("\n\n")
+    }
+
+    private fun formatEnvironmentReport(report: EnvironmentCheckReport): String {
+        if (report.checks.isEmpty()) return "Environment check: no checks were run."
+
+        return listOf(
+            "Environment check:",
+            *report.checks.map { check ->
+                "${formatEnvironmentStatus(check.status)} ${check.label}: ${check.message}"
+            }.toTypedArray(),
+        ).joinToString("\n")
+    }
+
+    private fun formatEnvironmentStatus(status: EnvironmentCheckStatus): String {
+        return when (status) {
+            EnvironmentCheckStatus.OK -> "[OK]"
+            EnvironmentCheckStatus.WARNING -> "[WARN]"
+            EnvironmentCheckStatus.ERROR -> "[ERROR]"
+        }
     }
 
     private fun shouldCreateFailureIssues(): Boolean {
@@ -976,6 +1028,7 @@ private data class InputValidationError(
 )
 
 private data class DeployPanelState(
+    val environmentReport: EnvironmentCheckReport,
     val repoId: String,
     val currentBranch: String,
     val branchOptions: List<String>,

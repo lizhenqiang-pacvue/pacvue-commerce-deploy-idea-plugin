@@ -1,0 +1,121 @@
+name: Deploy Issue Auto Triage
+
+on:
+  issues:
+    types: [opened, edited, reopened]
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  triage:
+    name: Route Pacvue Deploy auto-triage issue
+    runs-on: ubuntu-latest
+    if: >
+      contains(github.event.issue.title, '[auto-triage]') ||
+      contains(github.event.issue.body || '', 'pacvue-commerce-deploy-idea-plugin')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Parse issue
+        id: triage
+        run: |
+          node scripts/triage-deploy-issue.js \
+            --event "$GITHUB_EVENT_PATH" \
+            --out "$RUNNER_TEMP/pacvue-deploy-triage" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Ensure labels
+        if: steps.triage.outputs.should_process == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LABELS: ${{ steps.triage.outputs.labels }}
+        run: |
+          IFS=',' read -ra LABEL_ARRAY <<< "$LABELS"
+          for label in "${LABEL_ARRAY[@]}"; do
+            if [ -n "$label" ]; then
+              gh label create "$label" \
+                --repo "$GITHUB_REPOSITORY" \
+                --color "ededed" \
+                --description "Pacvue Deploy auto triage" || true
+            fi
+          done
+
+      - name: Add labels
+        if: steps.triage.outputs.should_process == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ steps.triage.outputs.issue_number }}
+          LABELS: ${{ steps.triage.outputs.labels }}
+        run: |
+          gh issue edit "$ISSUE_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --add-label "$LABELS"
+
+      - name: Comment triage result
+        if: steps.triage.outputs.should_process == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ steps.triage.outputs.issue_number }}
+          COMMENT_FILE: ${{ steps.triage.outputs.comment_file }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --body-file "$COMMENT_FILE"
+
+      - name: Dispatch plugin fix request
+        if: steps.triage.outputs.should_dispatch_plugin_fix == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISPATCH_PAYLOAD_FILE: ${{ steps.triage.outputs.dispatch_payload_file }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/dispatches" \
+            --method POST \
+            --input "$DISPATCH_PAYLOAD_FILE"
+
+      - name: Send owner email when configured
+        if: steps.triage.outputs.should_send_email == 'true'
+        env:
+          SMTP_HOST: ${{ secrets.PACVUE_DEPLOY_TRIAGE_SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.PACVUE_DEPLOY_TRIAGE_SMTP_PORT }}
+          SMTP_USERNAME: ${{ secrets.PACVUE_DEPLOY_TRIAGE_SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.PACVUE_DEPLOY_TRIAGE_SMTP_PASSWORD }}
+          EMAIL_FROM: ${{ secrets.PACVUE_DEPLOY_TRIAGE_EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.PACVUE_DEPLOY_TRIAGE_EMAIL_TO }}
+          EMAIL_SUBJECT: ${{ steps.triage.outputs.email_subject }}
+          EMAIL_BODY_FILE: ${{ steps.triage.outputs.email_body_file }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import smtplib
+          from email.message import EmailMessage
+
+          required = ["SMTP_HOST", "EMAIL_FROM", "EMAIL_TO", "EMAIL_BODY_FILE"]
+          missing = [name for name in required if not os.environ.get(name)]
+          if missing:
+              print("Email notification skipped. Missing secrets/env: " + ", ".join(missing))
+              raise SystemExit(0)
+
+          port = int(os.environ.get("SMTP_PORT") or "587")
+          body_file = os.environ["EMAIL_BODY_FILE"]
+
+          message = EmailMessage()
+          message["From"] = os.environ["EMAIL_FROM"]
+          message["To"] = os.environ["EMAIL_TO"]
+          message["Subject"] = os.environ.get("EMAIL_SUBJECT") or "Pacvue Deploy auto triage"
+          with open(body_file, "r", encoding="utf-8") as handle:
+              message.set_content(handle.read())
+
+          with smtplib.SMTP(os.environ["SMTP_HOST"], port, timeout=30) as smtp:
+              smtp.starttls()
+              username = os.environ.get("SMTP_USERNAME")
+              password = os.environ.get("SMTP_PASSWORD")
+              if username and password:
+                  smtp.login(username, password)
+              smtp.send_message(message)
+
+          print("Email notification sent.")
+          PY
