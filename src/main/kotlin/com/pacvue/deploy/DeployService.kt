@@ -56,6 +56,14 @@ class DeployService(private val project: Project) {
     val projectRoot: File
         get() = File(project.basePath ?: System.getProperty("user.home"))
 
+    fun getRepoId(): String {
+        val remoteUrl = runCatching {
+            runProcess("git", listOf("config", "--get", "remote.origin.url"), projectRoot).stdout.trim()
+        }.getOrDefault("")
+
+        return parseGithubRepoId(remoteUrl) ?: projectRoot.canonicalPath
+    }
+
     fun getCurrentBranch(): String {
         return runProcess("git", listOf("branch", "--show-current"), projectRoot).stdout.trim()
     }
@@ -176,6 +184,30 @@ class DeployService(private val project: Project) {
         val stderr = process.errorStream.bufferedReader().readText()
         val status = process.waitFor()
         return ProcessResult(status, stdout, stderr)
+    }
+
+    companion object {
+        fun parseGithubRepoId(remoteUrl: String): String? {
+            val normalized = remoteUrl.trim().removeSuffix(".git")
+            if (normalized.isBlank()) return null
+
+            val httpsMatch = Regex("""^https?://github\.com/([^/]+)/([^/]+)$""").matchEntire(normalized)
+            if (httpsMatch != null) {
+                return "${httpsMatch.groupValues[1]}/${httpsMatch.groupValues[2]}"
+            }
+
+            val sshMatch = Regex("""^git@github\.com:([^/]+)/([^/]+)$""").matchEntire(normalized)
+            if (sshMatch != null) {
+                return "${sshMatch.groupValues[1]}/${sshMatch.groupValues[2]}"
+            }
+
+            val sshUrlMatch = Regex("""^ssh://git@github\.com/([^/]+)/([^/]+)$""").matchEntire(normalized)
+            if (sshUrlMatch != null) {
+                return "${sshUrlMatch.groupValues[1]}/${sshUrlMatch.groupValues[2]}"
+            }
+
+            return null
+        }
     }
 }
 

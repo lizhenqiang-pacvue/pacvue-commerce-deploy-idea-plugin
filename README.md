@@ -9,6 +9,8 @@
 - 读取当前项目 Git 分支，下拉选择目标测试分支
 - 扫描 `.github/workflows` 下支持 `workflow_dispatch` 的 workflow（默认匹配名称含「测试环境发版」）
 - 根据 workflow inputs 动态生成表单
+- Recent Deploys 按当前 Commerce 项目独立保存，支持切换分支 / workflow 时自动回填缓存参数
+- Recent Deploys 支持一键 **Reuse** 复用历史发版参数，以及 **Clear** 清空当前项目历史
 - 点击 **Run** 触发发版，在输出区展示命令预览与 Run URL
 - 约每 5 秒轮询 GitHub Actions 状态，支持 **Cancel** 取消进行中的 run
 
@@ -43,23 +45,29 @@
 1. 用 IDE 打开 Pacvue Commerce 仓库根目录
 2. 右侧工具栏 → **Pacvue Deploy**
 3. 选择 **Target branch**、**Workflow**，填写动态参数
-4. 点击 **Refresh** 重新加载分支与 workflow 列表（可选）
-5. 点击 **Run** 触发发版；在输出区查看状态与 Run URL
-6. 运行中可点击 **Cancel** 取消
+4. 如果当前项目有历史发版记录，可在 **Recent Deploys** 中点击 **Reuse** 一键复用；切换分支 / workflow 时也会自动回填匹配的历史参数
+5. 点击 **Refresh** 重新加载分支与 workflow 列表（可选）
+6. 点击 **Run** 触发发版；在输出区查看状态与 Run URL
+7. 运行中可点击 **Cancel** 取消
+8. 需要时点击 **Recent Deploys** 右侧 **Clear**，只清空当前项目的历史发版记录
 
 ## 安装插件
 
-从 Release 或本地构建产物安装：
+从 [GitHub Releases](https://github.com/lizhenqiang-pacvue/pacvue-commerce-deploy-idea-plugin/releases) 下载 `pacvue-commerce-deploy-idea-plugin-*.zip`，或本地构建后安装：
 
 ```text
 Settings / Preferences → Plugins → ⚙ → Install Plugin from Disk...
 ```
 
-选择 `build/distributions/pacvue-commerce-deploy-idea-plugin-*.zip`，重启 IDE。
+选择 zip 文件，重启 IDE。
+
+当前最新版本：[v0.1.1](https://github.com/lizhenqiang-pacvue/pacvue-commerce-deploy-idea-plugin/releases/tag/v0.1.1)
 
 ## 打包命令
 
-需本机已安装 **JDK 17+** 与 **Gradle**（或使用 Gradle Wrapper）。
+需本机已安装 **Gradle**。项目通过 Gradle **Java Toolchain** 固定使用 **JDK 21** 编译（插件字节码目标仍为 Java 17）；若本机未安装 JDK 21，Gradle 会自动下载。
+
+> **注意**：请勿用 JDK 25 作为 Gradle 运行 JDK，当前 Kotlin 1.9.25 与之不兼容，会导致 `Internal compiler error`。`build.gradle.kts` 中的 toolchain 配置已规避此问题。
 
 ```bash
 # 打包插件（产物在 build/distributions/）
@@ -73,10 +81,24 @@ gradle test
 node --test src/test/js/deploy-to-test.test.js
 ```
 
+若 toolchain 未生效、仍报 Kotlin 编译错误，可手动指定 JDK 21：
+
+```bash
+export JAVA_HOME="/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home"
+gradle --stop && gradle buildPlugin
+```
+
 打包成功后安装包路径：
 
 ```text
-build/distributions/pacvue-commerce-deploy-idea-plugin-0.1.0.zip
+build/distributions/pacvue-commerce-deploy-idea-plugin-0.1.1.zip
+```
+
+发布到 GitHub Releases 示例：
+
+```bash
+gh release create v0.1.1 build/distributions/pacvue-commerce-deploy-idea-plugin-0.1.1.zip \
+  --title "v0.1.1" --notes "Release notes..."
 ```
 
 ## 命令行验证（可选）
@@ -118,6 +140,10 @@ gh auth login
 ### Run 已触发但轮询失败
 
 状态轮询与取消依赖官方 `gh`，请确保已安装并完成 `gh auth login`。
+
+### `gradle buildPlugin` 报 Kotlin Internal compiler error
+
+多为 Gradle 使用了 **JDK 25**（如新版 IntelliJ 自带 JBR）。请确认 `build.gradle.kts` 含 Java 21 toolchain，或按上文手动设置 `JAVA_HOME` 为 JDK 21 后执行 `gradle --stop && gradle buildPlugin`。
 
 ## 开发说明
 

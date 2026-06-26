@@ -25,12 +25,11 @@ class ExecutableResolverTest {
     }
 
     @Test
-    fun `extends child process PATH with common Windows executable locations`() {
-        val pathValue = ExecutableResolver.extendExecutablePath("C:\\Windows\\System32")
+    fun `exposes common Windows executable locations`() {
+        val directories = ExecutableResolver.windowsExecutableDirectories()
 
-        assertTrue(pathValue.startsWith("C:\\Windows\\System32"))
-        assertTrue(pathValue.contains("Git\\cmd"))
-        assertTrue(pathValue.contains("GitHub CLI"))
+        assertTrue(directories.any { it.contains("Git\\cmd") })
+        assertTrue(directories.any { it.contains("GitHub CLI") })
     }
 
     @Test

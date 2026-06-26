@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "com.pacvue"
-version = "0.1.0"
+version = "0.1.1"
 
 repositories {
     mavenCentral()
@@ -17,10 +17,21 @@ repositories {
 dependencies {
     implementation("com.google.code.gson:gson:2.11.0")
     testImplementation(kotlin("test"))
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
     intellijPlatform {
         intellijIdeaCommunity("2024.2")
         bundledPlugins("Git4Idea")
     }
+}
+
+java {
+    toolchain {
+        languageVersion.set(JavaLanguageVersion.of(21))
+    }
+}
+
+kotlin {
+    jvmToolchain(21)
 }
 
 tasks {

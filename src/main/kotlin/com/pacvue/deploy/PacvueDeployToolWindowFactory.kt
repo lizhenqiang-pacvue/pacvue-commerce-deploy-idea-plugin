@@ -15,6 +15,9 @@ import java.awt.BorderLayout
 import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
 import java.awt.Insets
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import javax.swing.JButton
 import javax.swing.JComboBox
 import javax.swing.JComponent
@@ -34,9 +37,13 @@ class PacvueDeployToolWindowFactory : ToolWindowFactory {
 
 private class PacvueDeployPanel(project: Project) : JPanel(BorderLayout()) {
     private val service = DeployService(project)
+    private val historyCache = DeployHistoryCache(project)
     private val branchCombo = createSearchableComboBox()
     private val workflowCombo = createSearchableWorkflowComboBox()
     private val inputsPanel = JPanel(GridBagLayout())
+    private val historyPanel = JPanel(BorderLayout(0, 4))
+    private val historyRowsPanel = JPanel(GridBagLayout())
+    private val clearHistoryButton = JButton("Clear")
     private val outputArea = JTextArea("Loading deploy metadata...")
     private val workflowStatusLabel = JLabel("Workflow status: Idle")
     private val executionResultLabel = JLabel("Execution result: Not started")
@@ -45,7 +52,10 @@ private class PacvueDeployPanel(project: Project) : JPanel(BorderLayout()) {
     private val cancelButton = JButton("Cancel")
     private val inputFields = linkedMapOf<String, JComponent>()
     private var workflows = emptyList<WorkflowMetadata>()
+    private var currentRepoId = ""
+    private var deployHistory = emptyList<DeployHistoryEntry>()
     private var lastRunStatusText = ""
+    private var suppressSelectionEvents = false
     @Volatile private var activeRunId: Long? = null
     @Volatile private var pollToken = 0
 
@@ -64,6 +74,14 @@ private class PacvueDeployPanel(project: Project) : JPanel(BorderLayout()) {
         addFormRow(formPanel, 3, "Workflow status", workflowStatusLabel)
         addFormRow(formPanel, 4, "Execution result", executionResultLabel)
 
+        val historyHeader = JPanel(BorderLayout())
+        historyHeader.add(JLabel("Recent Deploys"), BorderLayout.WEST)
+        historyHeader.add(clearHistoryButton, BorderLayout.EAST)
+        historyPanel.border = JBUI.Borders.empty(4, 0, 4, 0)
+        historyPanel.add(historyHeader, BorderLayout.NORTH)
+        historyPanel.add(historyRowsPanel, BorderLayout.CENTER)
+        historyPanel.isVisible = false
+
         val actionsPanel = JPanel()
         actionsPanel.border = JBUI.Borders.empty(4, 0, 8, 0)
         actionsPanel.add(refreshButton)
@@ -72,15 +90,18 @@ private class PacvueDeployPanel(project: Project) : JPanel(BorderLayout()) {
 
         val topPanel = JPanel(BorderLayout(0, 8))
         topPanel.add(formPanel, BorderLayout.NORTH)
+        topPanel.add(historyPanel, BorderLayout.CENTER)
         topPanel.add(actionsPanel, BorderLayout.SOUTH)
 
         add(topPanel, BorderLayout.NORTH)
         add(JBScrollPane(outputArea), BorderLayout.CENTER)
 
         refreshButton.addActionListener { refreshState() }
-        workflowCombo.addActionListener { renderInputs(getSelectedWorkflow()) }
+        workflowCombo.addActionListener { if (!suppressSelectionEvents) renderInputs(getSelectedWorkflow()) }
+        branchCombo.addActionListener { if (!suppressSelectionEvents) renderInputs(getSelectedWorkflow()) }
         runButton.addActionListener { runDeploy() }
         cancelButton.addActionListener { cancelActiveRun() }
+        clearHistoryButton.addActionListener { clearDeployHistory() }
 
         setBusy(true)
         cancelButton.isEnabled = false
@@ -95,21 +116,30 @@ private class PacvueDeployPanel(project: Project) : JPanel(BorderLayout()) {
                 val currentBranch = service.getCurrentBranch()
                 val branchOptions = service.getBranchOptions(currentBranch)
                 val workflowMetadata = service.getWorkflowMetadata()
-                Triple(currentBranch, branchOptions, workflowMetadata.workflows)
+                DeployPanelState(
+                    repoId = service.getRepoId(),
+                    currentBranch = currentBranch,
+                    branchOptions = branchOptions,
+                    workflows = workflowMetadata.workflows,
+                )
             }
 
             SwingUtilities.invokeLater {
                 result
-                    .onSuccess { (currentBranch, branchOptions, loadedWorkflows) ->
-                        workflows = loadedWorkflows
-                        setComboOptions(
-                            branchCombo,
-                            branchOptions,
-                            currentBranch.takeIf { branchOptions.contains(it) } ?: branchOptions.firstOrNull(),
-                        )
-
-                        setWorkflowOptions(workflows, workflows.firstOrNull { it.isDefaultDeployWorkflow } ?: workflows.firstOrNull())
+                    .onSuccess { state ->
+                        currentRepoId = state.repoId
+                        workflows = state.workflows
+                        deployHistory = historyCache.getRecentDeploys(currentRepoId)
+                        withSelectionEventsSuppressed {
+                            setComboOptions(
+                                branchCombo,
+                                state.branchOptions,
+                                state.currentBranch.takeIf { state.branchOptions.contains(it) } ?: state.branchOptions.firstOrNull(),
+                            )
+                            setWorkflowOptions(workflows, workflows.firstOrNull { it.isDefaultDeployWorkflow } ?: workflows.firstOrNull())
+                        }
                         renderInputs(getSelectedWorkflow())
+                        renderHistory()
                         outputArea.text = if (workflows.isEmpty()) "No workflow_dispatch workflows were found." else "Ready."
                     }
                     .onFailure { error ->
@@ -141,6 +171,7 @@ private class PacvueDeployPanel(project: Project) : JPanel(BorderLayout()) {
 
         inputsPanel.revalidate()
         inputsPanel.repaint()
+        applyCachedInputs(workflow)
     }
 
     private fun createInputField(input: WorkflowInput): JComponent {
@@ -165,9 +196,98 @@ private class PacvueDeployPanel(project: Project) : JPanel(BorderLayout()) {
         }
     }
 
+    private fun renderHistory() {
+        historyRowsPanel.removeAll()
+        historyPanel.isVisible = deployHistory.isNotEmpty()
+        clearHistoryButton.isEnabled = deployHistory.isNotEmpty()
+
+        deployHistory.forEachIndexed { index, entry ->
+            val row = JPanel(BorderLayout(8, 0))
+            row.border = JBUI.Borders.empty(4, 0)
+
+            val summaryPanel = JPanel(GridBagLayout())
+            val title = "${entry.workflowName.ifBlank { entry.workflow }} @ ${entry.branch.ifBlank { "branch" }}"
+            val metaLabel = JLabel("$title · ${formatHistoryTime(entry.ts)}")
+            metaLabel.toolTipText = "${entry.repoId}\n${entry.workflow}"
+            val inputsLabel = JLabel(formatHistoryInputs(entry.inputs))
+            inputsLabel.toolTipText = inputsLabel.text
+
+            summaryPanel.add(metaLabel, gridConstraints(0, 0, fill = GridBagConstraints.HORIZONTAL, weightX = 1.0))
+            summaryPanel.add(inputsLabel, gridConstraints(0, 1, fill = GridBagConstraints.HORIZONTAL, weightX = 1.0))
+
+            val reuseButton = JButton("Reuse")
+            reuseButton.addActionListener { applyHistoryEntry(entry) }
+
+            row.add(summaryPanel, BorderLayout.CENTER)
+            row.add(reuseButton, BorderLayout.EAST)
+            historyRowsPanel.add(row, gridConstraints(0, index, fill = GridBagConstraints.HORIZONTAL, weightX = 1.0))
+        }
+
+        historyPanel.revalidate()
+        historyPanel.repaint()
+    }
+
+    private fun applyCachedInputs(workflow: WorkflowMetadata?) {
+        val branch = branchCombo.selectedItem?.toString().orEmpty()
+        val workflowFile = workflow?.file.orEmpty()
+        val cached = historyCache.findRecentDeploy(currentRepoId, branch, workflowFile) ?: return
+
+        applyInputValues(cached.inputs)
+    }
+
+    private fun applyInputValues(inputs: Map<String, String>) {
+        inputs.forEach { (name, value) ->
+            val field = inputFields[name] ?: return@forEach
+            when (field) {
+                is JTextField -> field.text = value
+                is JComboBox<*> -> selectComboValue(field, value)
+            }
+        }
+    }
+
+    private fun selectComboValue(comboBox: JComboBox<*>, value: String) {
+        @Suppress("UNCHECKED_CAST")
+        val typedComboBox = comboBox as JComboBox<Any>
+        val existingIndex = (0 until typedComboBox.itemCount).firstOrNull { typedComboBox.getItemAt(it)?.toString() == value }
+        if (existingIndex == null && value.isNotBlank()) {
+            typedComboBox.addItem(value)
+        }
+        typedComboBox.selectedItem = value
+    }
+
+    private fun applyHistoryEntry(entry: DeployHistoryEntry) {
+        val workflow = workflows.find { it.file == entry.workflow } ?: WorkflowMetadata(file = entry.workflow, name = entry.workflowName)
+
+        withSelectionEventsSuppressed {
+            ensureComboValue(branchCombo, entry.branch)
+            branchCombo.selectedItem = entry.branch
+            selectWorkflowOption(workflow)
+        }
+
+        renderInputs(workflow)
+        applyInputValues(entry.inputs)
+        outputArea.text = listOf(
+            "Recent deploy config applied.",
+            "Branch: ${entry.branch}",
+            "Workflow: ${entry.workflowName.ifBlank { entry.workflow }}",
+            "Inputs: ${formatHistoryInputs(entry.inputs)}",
+        ).joinToString("\n")
+    }
+
+    private fun clearDeployHistory() {
+        if (currentRepoId.isBlank()) return
+
+        historyCache.clear(currentRepoId)
+        deployHistory = emptyList()
+        renderHistory()
+        outputArea.text = "Recent Deploys cleared for current project."
+    }
+
     private fun runDeploy() {
         val branch = branchCombo.selectedItem?.toString().orEmpty()
-        val workflow = getSelectedWorkflow()?.file.orEmpty()
+        val selectedWorkflow = getSelectedWorkflow()
+        val workflow = selectedWorkflow?.file.orEmpty()
+        val workflowName = selectedWorkflow?.name?.takeIf { it.isNotBlank() } ?: workflow
         if (branch.isBlank() || workflow.isBlank()) {
             outputArea.text = "Target branch and workflow are required."
             return
@@ -182,13 +302,25 @@ private class PacvueDeployPanel(project: Project) : JPanel(BorderLayout()) {
         val inputs = collectInputs()
 
         ApplicationManager.getApplication().executeOnPooledThread {
-            val result = runCatching { service.runDeploy(branch, workflow, inputs, dispatch = true) }
+            val result = runCatching {
+                val deployResult = service.runDeploy(branch, workflow, inputs, dispatch = true)
+                val repoId = if (deployResult.status == 0 && deployResult.run?.databaseId != null) service.getRepoId() else ""
+                deployResult to repoId
+            }
             SwingUtilities.invokeLater {
                 result.fold(
-                    onSuccess = {
-                        outputArea.text = formatResult(it)
-                        if (it.status == 0 && it.run?.databaseId != null) {
-                            startPollingRun(it.run)
+                    onSuccess = { (deployResult, repoId) ->
+                        outputArea.text = formatResult(deployResult)
+                        if (deployResult.status == 0 && deployResult.run?.databaseId != null) {
+                            deployHistory = historyCache.append(
+                                repoId = repoId,
+                                branch = branch,
+                                workflow = workflow,
+                                workflowName = workflowName,
+                                inputs = inputs,
+                            )
+                            renderHistory()
+                            startPollingRun(deployResult.run)
                         } else {
                             workflowStatusLabel.text = "Workflow status: Failed"
                             executionResultLabel.text = "Execution result: Workflow was not triggered."
@@ -405,7 +537,32 @@ private class PacvueDeployPanel(project: Project) : JPanel(BorderLayout()) {
     private fun setWorkflowOptions(options: List<WorkflowMetadata>, selected: WorkflowMetadata?) {
         workflowCombo.removeAllItems()
         options.map { WorkflowComboItem(it) }.forEach { workflowCombo.addItem(it) }
-        workflowCombo.selectedItem = selected?.let { WorkflowComboItem(it) } ?: workflowCombo.getItemAt(0)
+        workflowCombo.selectedItem = selected?.let { WorkflowComboItem(it) } ?: if (workflowCombo.itemCount > 0) workflowCombo.getItemAt(0) else null
+    }
+
+    private fun ensureComboValue(comboBox: JComboBox<String>, value: String) {
+        if (value.isBlank()) return
+        val exists = (0 until comboBox.itemCount).any { comboBox.getItemAt(it) == value }
+        if (!exists) {
+            comboBox.addItem(value)
+        }
+    }
+
+    private fun selectWorkflowOption(workflow: WorkflowMetadata) {
+        val existing = (0 until workflowCombo.itemCount)
+            .map { workflowCombo.getItemAt(it) }
+            .firstOrNull { it.workflow.file == workflow.file }
+        val item = existing ?: WorkflowComboItem(workflow).also { workflowCombo.addItem(it) }
+        workflowCombo.selectedItem = item
+    }
+
+    private fun withSelectionEventsSuppressed(action: () -> Unit) {
+        suppressSelectionEvents = true
+        try {
+            action()
+        } finally {
+            suppressSelectionEvents = false
+        }
     }
 
     private fun gridConstraints(
@@ -425,10 +582,32 @@ private class PacvueDeployPanel(project: Project) : JPanel(BorderLayout()) {
     }
 }
 
+private val historyTimeFormat: DateTimeFormatter = DateTimeFormatter.ofPattern("MM/dd HH:mm").withZone(ZoneId.systemDefault())
+
 private data class WorkflowComboItem(val workflow: WorkflowMetadata) {
     override fun toString(): String {
         return workflow.name.ifBlank { workflow.file }
     }
+}
+
+private data class DeployPanelState(
+    val repoId: String,
+    val currentBranch: String,
+    val branchOptions: List<String>,
+    val workflows: List<WorkflowMetadata>,
+)
+
+private fun formatHistoryTime(ts: Long): String {
+    return runCatching { historyTimeFormat.format(Instant.ofEpochMilli(ts)) }.getOrDefault("")
+}
+
+private fun formatHistoryInputs(inputs: Map<String, String>): String {
+    val text = inputs
+        .filterValues { it.isNotBlank() }
+        .entries
+        .joinToString(", ") { (key, value) -> "$key=$value" }
+        .ifBlank { "No inputs" }
+    return text.take(180)
 }
 
 private fun JsonElement?.asJsonObjectOrNull(): JsonObject? {
@@ -441,4 +620,3 @@ private fun JsonElement?.asNonBlankStringOrNull(): String? {
         ?.asString
         ?.takeIf { it.isNotBlank() }
 }
-
