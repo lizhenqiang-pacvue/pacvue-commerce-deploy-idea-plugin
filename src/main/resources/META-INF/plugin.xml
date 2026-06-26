@@ -11,6 +11,7 @@
     <depends optional="true">Git4Idea</depends>
 
     <extensions defaultExtensionNs="com.intellij">
+        <notificationGroup id="Pacvue Deploy" displayType="BALLOON" />
         <toolWindow
             id="Pacvue Deploy"
             anchor="right"

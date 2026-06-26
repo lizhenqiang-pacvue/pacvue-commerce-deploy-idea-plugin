@@ -9,10 +9,14 @@
 - 读取当前项目 Git 分支，下拉选择目标测试分支
 - 扫描 `.github/workflows` 下支持 `workflow_dispatch` 的 workflow（默认匹配名称含「测试环境发版」）
 - 根据 workflow inputs 动态生成表单
+- Run 前校验必填 inputs、choice / boolean 类型值，避免明显错误参数进入发版确认
 - Recent Deploys 按当前 Commerce 项目独立保存，支持切换分支 / workflow 时自动回填缓存参数
-- Recent Deploys 支持一键 **Reuse** 复用历史发版参数，以及 **Clear** 清空当前项目历史
-- 点击 **Run** 触发发版，在输出区展示命令预览与 Run URL
-- 约每 5 秒轮询 GitHub Actions 状态，支持 **Cancel** 取消进行中的 run
+- Recent Deploys 支持展开 / 收起，每条记录显示独立 run 状态，并支持 **Reuse** 复用历史参数与 **Open Run** 打开对应 GitHub Actions run；`in_progress` 记录显示 **Cancel** 且隐藏 **Clear**，其他记录支持 **Clear** 删除；列表最多展示 5 条，超出后内部滚动
+- 点击 **Run** 后先确认 branch、workflow、inputs，再点击 **Confirm Deploy** 触发发版
+- 约每 5 秒轮询 GitHub Actions 状态；run 创建后表单与 **Run** 会恢复可用，可继续切换分支 / 配置发起新的发版，面板会转为跟踪最新 run
+- 每条 Recent Deploys 记录可直接打开对应 GitHub Actions run，运行中的记录可直接取消
+- GitHub Actions 发版成功后自动弹出 IDE 通知
+- 发版触发失败或 GitHub Actions run 失败（非 cancelled）时自动创建 `[auto-triage]` GitHub Issue，便于后续排查和自动分流
 
 ## 环境要求
 
@@ -40,6 +44,17 @@
 
 > **Windows 提示**：若终端能用 git/gh 但插件报错，多为 GUI 进程 PATH 与 shell 不一致。插件会尝试常见安装路径；仍失败时可设置 `PACVUE_GIT_PATH`、`PACVUE_GH_PATH` 指向官方可执行文件。
 
+### 自动 Issue
+
+触发失败或 Actions run 失败（非 `cancelled`）时，插件会默认在 `lizhenqiang-pacvue/pacvue-commerce-deploy-idea-plugin` 创建 `[auto-triage]` Issue。Issue 内容包含 branch、workflow、inputs、Run URL、失败 job 摘要、错误输出和项目 `.github` 配置快照。
+
+可选环境变量：
+
+| 变量 | 说明 |
+|------|------|
+| `PACVUE_DEPLOY_ISSUE_REPO` | 覆盖 Issue 目标仓库，格式 `owner/repo` |
+| `PACVUE_DEPLOY_CREATE_ISSUE=false` | 临时关闭失败自动创建 Issue |
+
 ## 使用步骤
 
 1. 用 IDE 打开 Pacvue Commerce 仓库根目录
@@ -47,9 +62,11 @@
 3. 选择 **Target branch**、**Workflow**，填写动态参数
 4. 如果当前项目有历史发版记录，可在 **Recent Deploys** 中点击 **Reuse** 一键复用；切换分支 / workflow 时也会自动回填匹配的历史参数
 5. 点击 **Refresh** 重新加载分支与 workflow 列表（可选）
-6. 点击 **Run** 触发发版；在输出区查看状态与 Run URL
-7. 运行中可点击 **Cancel** 取消
-8. 需要时点击 **Recent Deploys** 右侧 **Clear**，只清空当前项目的历史发版记录
+6. 点击 **Run**，插件会先校验输入，再在确认弹窗核对参数后点击 **Confirm Deploy**；在输出区查看状态与 Run URL
+7. run 创建后可继续调整分支 / 配置并再次点击 **Run** 发起新发版；每条 Recent Deploys 会独立展示自己的 run 状态
+8. 拿到 Run URL 后可在对应历史记录中点击 **Open Run** 打开 GitHub Actions 页面
+9. 运行中的历史记录可点击 **Cancel** 取消对应 run
+10. 需要时点击历史记录旁的 **Clear**，只删除当前项目中的对应记录
 
 ## 安装插件
 
@@ -61,7 +78,17 @@ Settings / Preferences → Plugins → ⚙ → Install Plugin from Disk...
 
 选择 zip 文件，重启 IDE。
 
-当前最新版本：[v0.1.1](https://github.com/lizhenqiang-pacvue/pacvue-commerce-deploy-idea-plugin/releases/tag/v0.1.1)
+当前最新版本：[v0.1.2](https://github.com/lizhenqiang-pacvue/pacvue-commerce-deploy-idea-plugin/releases/tag/v0.1.2)
+
+## 更新说明
+
+### v0.1.2
+
+- Recent Deploys 按 Commerce 项目隔离缓存，支持展开 / 收起、最多 5 条滚动展示、逐条 **Reuse** / **Open Run** / **Cancel** / **Clear**
+- 每条历史记录独立展示 GitHub Actions run 状态，运行中记录显示 **Cancel** 并隐藏 **Clear**
+- Run 在 dispatch 完成后恢复可用，支持同一面板连续发起多次发版并分别跟踪历史状态
+- 发版前增加确认弹窗与 required / choice / boolean 输入校验
+- 发版成功时弹出 IDE 通知；触发失败或 run 失败时自动在 IDEA 插件仓库创建 `[auto-triage]` Issue
 
 ## 打包命令
 
@@ -91,14 +118,14 @@ gradle --stop && gradle buildPlugin
 打包成功后安装包路径：
 
 ```text
-build/distributions/pacvue-commerce-deploy-idea-plugin-0.1.1.zip
+build/distributions/pacvue-commerce-deploy-idea-plugin-0.1.2.zip
 ```
 
 发布到 GitHub Releases 示例：
 
 ```bash
-gh release create v0.1.1 build/distributions/pacvue-commerce-deploy-idea-plugin-0.1.1.zip \
-  --title "v0.1.1" --notes "Release notes..."
+gh release create v0.1.2 build/distributions/pacvue-commerce-deploy-idea-plugin-0.1.2.zip \
+  --title "v0.1.2" --notes "Release notes..."
 ```
 
 ## 命令行验证（可选）

@@ -13,6 +13,11 @@ internal data class DeployHistoryEntry(
     val workflow: String = "",
     val workflowName: String = "",
     val inputs: Map<String, String> = emptyMap(),
+    val runId: Long? = null,
+    val runUrl: String? = null,
+    val status: String? = null,
+    val conclusion: String? = null,
+    val statusUpdatedAt: Long = 0,
 )
 
 internal class DeployHistoryCache(project: Project) {
@@ -43,6 +48,7 @@ internal class DeployHistoryCache(project: Project) {
         workflow: String,
         workflowName: String,
         inputs: Map<String, String>,
+        run: WorkflowRunStatus?,
     ): List<DeployHistoryEntry> {
         if (repoId.isBlank()) return emptyList()
 
@@ -55,14 +61,62 @@ internal class DeployHistoryCache(project: Project) {
             workflow = workflow,
             workflowName = workflowName,
             inputs = inputs,
+            runId = run?.databaseId,
+            runUrl = run?.url,
+            status = run?.status,
+            conclusion = run?.conclusion?.takeIf { it.isNotBlank() },
+            statusUpdatedAt = now,
         )
         val next = sequenceOf(entry)
-            .plus(getRecentDeploys(repoId).asSequence().filter { signature(it) != signature(entry) })
+            .plus(getRecentDeploys(repoId).asSequence())
             .take(HISTORY_LIMIT)
             .toList()
 
         writeEntries(historyKey(repoId), next)
         return next
+    }
+
+    fun updateRunStatus(repoId: String, run: WorkflowRunStatus): List<DeployHistoryEntry> {
+        val runId = run.databaseId ?: return getRecentDeploys(repoId)
+        if (repoId.isBlank()) return emptyList()
+
+        val scopedKey = historyKey(repoId)
+        val scopedEntries = readEntries(scopedKey)
+        if (scopedEntries.isNotEmpty()) {
+            val scopedNext = updateEntries(scopedEntries, runId, run)
+            writeEntries(scopedKey, scopedNext)
+            return scopedNext
+        }
+
+        val legacyEntries = readEntries(LEGACY_HISTORY_KEY)
+        if (legacyEntries.any { it.repoId == repoId && it.runId == runId }) {
+            writeEntries(
+                LEGACY_HISTORY_KEY,
+                legacyEntries.map { entry -> if (entry.repoId == repoId && entry.runId == runId) entry.withRunStatus(run) else entry },
+            )
+        }
+        return getRecentDeploys(repoId)
+    }
+
+    fun remove(repoId: String, entryId: String): List<DeployHistoryEntry> {
+        if (repoId.isBlank() || entryId.isBlank()) return getRecentDeploys(repoId)
+
+        val scopedKey = historyKey(repoId)
+        val scopedEntries = readEntries(scopedKey)
+        val scopedNext = scopedEntries.filter { it.id != entryId }
+        if (scopedEntries.isNotEmpty()) {
+            writeEntries(scopedKey, scopedNext)
+        }
+
+        val legacyEntries = readEntries(LEGACY_HISTORY_KEY)
+        if (legacyEntries.any { it.repoId == repoId && it.id == entryId }) {
+            writeEntries(
+                LEGACY_HISTORY_KEY,
+                legacyEntries.filter { it.repoId != repoId || it.id != entryId },
+            )
+        }
+
+        return if (scopedEntries.isNotEmpty()) scopedNext else getRecentDeploys(repoId)
     }
 
     fun clear(repoId: String) {
@@ -97,21 +151,20 @@ internal class DeployHistoryCache(project: Project) {
         return "$LEGACY_HISTORY_KEY::$repoId"
     }
 
-    private fun signature(entry: DeployHistoryEntry): DeployHistorySignature {
-        return DeployHistorySignature(
-            repoId = entry.repoId,
-            branch = entry.branch,
-            workflow = entry.workflow,
-            inputs = entry.inputs,
-        )
+    private fun updateEntries(entries: List<DeployHistoryEntry>, runId: Long, run: WorkflowRunStatus): List<DeployHistoryEntry> {
+        return entries.map { entry ->
+            if (entry.runId == runId) entry.withRunStatus(run) else entry
+        }
     }
 
-    private data class DeployHistorySignature(
-        val repoId: String,
-        val branch: String,
-        val workflow: String,
-        val inputs: Map<String, String>,
-    )
+    private fun DeployHistoryEntry.withRunStatus(run: WorkflowRunStatus): DeployHistoryEntry {
+        return copy(
+            runUrl = run.url?.takeIf { it.isNotBlank() } ?: runUrl,
+            status = run.status ?: status,
+            conclusion = run.conclusion?.takeIf { it.isNotBlank() } ?: conclusion,
+            statusUpdatedAt = System.currentTimeMillis(),
+        )
+    }
 
     companion object {
         private const val LEGACY_HISTORY_KEY = "pacvueDeploy.deployHistory"
