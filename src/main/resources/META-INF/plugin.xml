@@ -4,7 +4,26 @@
     <vendor>Pacvue</vendor>
 
     <description><![CDATA[
-        Visual JetBrains IDE tool window for triggering Pacvue Commerce GitHub Actions deployments.
+        <p>
+            <b>Pacvue Commerce Deploy</b> is a JetBrains IDE tool window for triggering
+            Pacvue Commerce test-environment deployments from GitHub Actions.
+        </p>
+        <p>
+            Open a Pacvue Commerce repository in IntelliJ IDEA or WebStorm, select the
+            target branch and workflow, fill in the workflow inputs, confirm the deploy,
+            and then track the GitHub Actions run directly inside the IDE.
+        </p>
+        <ul>
+            <li>Loads local Git branches and workflow_dispatch workflows from the current project.</li>
+            <li>Builds the deploy form from workflow inputs and validates required, choice, and boolean values before running.</li>
+            <li>Keeps project-scoped Recent Deploys with Reuse, Open Run, Cancel, and Clear actions.</li>
+            <li>Tracks each deployment run independently and shows success notifications in the IDE.</li>
+            <li>Creates an auto-triage GitHub Issue when dispatch or workflow execution fails.</li>
+        </ul>
+        <p>
+            Requirements: Node.js 16+, Git, and GitHub CLI authentication are recommended
+            for dispatching, polling, opening, and cancelling workflow runs.
+        </p>
     ]]></description>
 
     <depends>com.intellij.modules.platform</depends>
