@@ -113,9 +113,17 @@ Settings / Preferences → Plugins → ⚙ → Install Plugin from Disk...
 
 选择 zip 文件，重启 IDE。
 
-当前最新版本：[v0.1.2](https://github.com/lizhenqiang-pacvue/pacvue-commerce-deploy-idea-plugin/releases/tag/v0.1.2)
+当前最新版本：[v0.1.3](https://github.com/lizhenqiang-pacvue/pacvue-commerce-deploy-idea-plugin/releases/tag/v0.1.3)
 
 ## 更新说明
+
+### v0.1.3
+
+- 打开面板或点击 Refresh 时新增环境自检，检查 Git 仓库、`.github/workflows`、Node.js、GitHub CLI 与 `gh auth` 状态
+- 自动 Issue 增加结构化诊断字段，包括 `failureCategory`、`triageRoute`、`recommendedAction` 和机器可读 Payload
+- 自动 Issue 增加 `dedupeFingerprint` 去重；相同失败会追加到已有 open Issue，不再反复新建
+- 新增 Issue 自动分流 workflow，根据 `triageRoute` 自动打标签、评论分流结果，并为插件代码问题发出 `repository_dispatch`
+- 项目配置和 workflow 运行失败支持在配置 SMTP secrets 后发送邮件通知
 
 ### v0.1.2
 
@@ -153,14 +161,14 @@ gradle --stop && gradle buildPlugin
 打包成功后安装包路径：
 
 ```text
-build/distributions/pacvue-commerce-deploy-idea-plugin-0.1.2.zip
+build/distributions/pacvue-commerce-deploy-idea-plugin-0.1.3.zip
 ```
 
 发布到 GitHub Releases 示例：
 
 ```bash
-gh release create v0.1.2 build/distributions/pacvue-commerce-deploy-idea-plugin-0.1.2.zip \
-  --title "v0.1.2" --notes "Release notes..."
+gh release create v0.1.3 build/distributions/pacvue-commerce-deploy-idea-plugin-0.1.3.zip \
+  --title "v0.1.3" --notes "Release notes..."
 ```
 
 ## 命令行验证（可选）
