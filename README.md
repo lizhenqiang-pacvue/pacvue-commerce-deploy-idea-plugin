@@ -113,9 +113,15 @@ Settings / Preferences → Plugins → ⚙ → Install Plugin from Disk...
 
 选择 zip 文件，重启 IDE。
 
-当前最新版本：[v0.1.3](https://github.com/lizhenqiang-pacvue/pacvue-commerce-deploy-idea-plugin/releases/tag/v0.1.3)
+当前最新版本：[v0.1.4](https://github.com/lizhenqiang-pacvue/pacvue-commerce-deploy-idea-plugin/releases/tag/v0.1.4)
 
 ## 更新说明
+
+### v0.1.4
+
+- 修复空 `until-build` 导致新版本 IDE（如 2024.3 / 2025.x / 2026.x）安装时报「无法加载插件描述符」
+- 修复 Windows 上 git 虽被 IDE 探测到但不在 `PATH` 时，`gh` 触发发版报 `unable to find git executable in PATH`：现在会把解析到的 git / gh 目录前置进子进程 `PATH`
+- 自动 Issue 分流新增 `git_unavailable` / `local_environment` 分类，git 环境问题不再被误判为 `dispatch_failed`
 
 ### v0.1.3
 
@@ -161,14 +167,14 @@ gradle --stop && gradle buildPlugin
 打包成功后安装包路径：
 
 ```text
-build/distributions/pacvue-commerce-deploy-idea-plugin-0.1.3.zip
+build/distributions/pacvue-commerce-deploy-idea-plugin-0.1.4.zip
 ```
 
 发布到 GitHub Releases 示例：
 
 ```bash
-gh release create v0.1.3 build/distributions/pacvue-commerce-deploy-idea-plugin-0.1.3.zip \
-  --title "v0.1.3" --notes "Release notes..."
+gh release create v0.1.4 build/distributions/pacvue-commerce-deploy-idea-plugin-0.1.4.zip \
+  --title "v0.1.4" --notes "Release notes..."
 ```
 
 ## 命令行验证（可选）
