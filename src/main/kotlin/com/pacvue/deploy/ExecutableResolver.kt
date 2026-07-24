@@ -38,8 +38,9 @@ internal object ExecutableResolver {
         return if (isWindows) windowsExecutableDirectories() else macExecutableDirectories
     }
 
-    fun extendExecutablePath(pathValue: String?): String {
+    fun extendExecutablePath(pathValue: String?, priorityDirectories: List<String> = emptyList()): String {
         return sequenceOf(
+            priorityDirectories.asSequence(),
             pathValue.orEmpty().split(File.pathSeparator).asSequence(),
             platformExecutableDirectories().asSequence(),
         )
@@ -48,6 +49,12 @@ internal object ExecutableResolver {
             .filter { it.isNotEmpty() }
             .distinct()
             .joinToString(File.pathSeparator)
+    }
+
+    private fun executableParentDirectory(executablePath: String?): String? {
+        return executablePath
+            ?.let { runCatching { File(it).parentFile?.absolutePath }.getOrNull() }
+            ?.takeIf { it.isNotBlank() }
     }
 
     fun resolveExecutableCommand(
@@ -96,9 +103,22 @@ internal object ExecutableResolver {
         workingDir: File,
     ) {
         val environment = builder.environment()
-        environment["PATH"] = extendExecutablePath(environment["PATH"])
-        resolveGitPath(project, workingDir)?.let { environment[GIT_PATH_ENV] = it }
-        resolveGhPath(workingDir)?.let { environment[GH_PATH_ENV] = it }
+        val gitPath = resolveGitPath(project, workingDir)
+        val ghPath = resolveGhPath(workingDir)
+
+        // gh (and git itself) only discover helper executables through PATH. When
+        // git lives in a directory the IDE knows about via GitExecutableManager but
+        // that is not on PATH, `gh workflow run` shells out to git and fails with
+        // "unable to find git executable in PATH". Exposing git only through
+        // PACVUE_GIT_PATH is not enough because gh does not read that variable, so
+        // prepend the resolved git/gh directories onto PATH for every child process.
+        val toolDirectories = listOfNotNull(
+            executableParentDirectory(gitPath),
+            executableParentDirectory(ghPath),
+        )
+        environment["PATH"] = extendExecutablePath(environment["PATH"], toolDirectories)
+        gitPath?.let { environment[GIT_PATH_ENV] = it }
+        ghPath?.let { environment[GH_PATH_ENV] = it }
     }
 
     fun findSystemExecutable(

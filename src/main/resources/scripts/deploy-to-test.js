@@ -426,6 +426,30 @@ function getCommandPath(command) {
   return searchExecutableInDirectories(command, [...pathDirs, ...platformDirs])
 }
 
+/**
+ * gh 会 shell out 调用 git 来解析当前仓库；它只从 PATH 里找 git，不认 PACVUE_GIT_PATH。
+ * 因此把已解析到的 git / gh 可执行文件目录前置进 process.env.PATH，
+ * 保证后续 spawn 的 gh（继承 process.env）能在 PATH 中找到 git，
+ * 否则会报 "unable to find git executable in PATH"。
+ */
+function ensureToolDirectoriesOnPath() {
+  const separator = process.platform === "win32" ? ";" : ":"
+  const existing = (process.env.PATH || "").split(separator).map((dir) => dir.trim()).filter(Boolean)
+  const toolDirectories = ["git", "gh"]
+    .map((command) => getCommandPath(command))
+    .filter(Boolean)
+    .map((toolPath) => path.dirname(toolPath))
+
+  const seen = new Set()
+  const merged = [...toolDirectories, ...existing].filter((dir) => {
+    if (!dir || seen.has(dir)) return false
+    seen.add(dir)
+    return true
+  })
+
+  process.env.PATH = merged.join(separator)
+}
+
 function getMissingGhPayload() {
   return {
     ok: false,
@@ -658,6 +682,8 @@ function main(argv = process.argv.slice(2)) {
     return 0
   }
 
+  ensureToolDirectoriesOnPath()
+
   const repoRoot = args.repoRoot
   if (args.listWorkflowsJson) {
     const workflows = discoverWorkflows(repoRoot, { includeAll: true }).map((workflow) => formatWorkflowMetadata(repoRoot, workflow))
@@ -757,6 +783,7 @@ module.exports = {
   commandExists,
   detectMode,
   discoverWorkflows,
+  ensureToolDirectoriesOnPath,
   extractExplicitBranch,
   formatWorkflowMetadata,
   getCommandPath,

@@ -1,7 +1,9 @@
 const test = require("node:test")
 const assert = require("node:assert/strict")
 
-const { buildWorkflowCommand, commandExists, getCommandPath, runWorkflowDispatch } = require("../../main/resources/scripts/deploy-to-test.js")
+const path = require("node:path")
+
+const { buildWorkflowCommand, commandExists, ensureToolDirectoriesOnPath, getCommandPath, runWorkflowDispatch } = require("../../main/resources/scripts/deploy-to-test.js")
 
 test("normalizes workflow paths before passing them to gh", () => {
   const command = buildWorkflowCommand({
@@ -68,6 +70,26 @@ test("returns the new workflow run when dispatch is verified", () => {
   assert.equal(result.verified, true)
   assert.equal(result.run.databaseId, 123)
   assert.equal(result.run.url, "https://github.com/example/repo/actions/runs/123")
+})
+
+test("prepends the resolved git directory onto PATH so gh can find git", () => {
+  const separator = process.platform === "win32" ? ";" : ":"
+  const previousGitPath = process.env.PACVUE_GIT_PATH
+  const previousPath = process.env.PATH
+
+  process.env.PACVUE_GIT_PATH = process.execPath
+  process.env.PATH = "/only/some/other/dir"
+
+  try {
+    ensureToolDirectoriesOnPath()
+    const dirs = process.env.PATH.split(separator)
+    assert.equal(dirs[0], path.dirname(process.execPath))
+    assert.ok(dirs.includes("/only/some/other/dir"))
+  } finally {
+    if (previousGitPath === undefined) delete process.env.PACVUE_GIT_PATH
+    else process.env.PACVUE_GIT_PATH = previousGitPath
+    process.env.PATH = previousPath
+  }
 })
 
 test("prefers PACVUE_GIT_PATH when resolving git", () => {

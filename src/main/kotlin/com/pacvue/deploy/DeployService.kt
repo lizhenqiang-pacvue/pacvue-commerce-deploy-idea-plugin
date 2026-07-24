@@ -628,10 +628,23 @@ class DeployService(private val project: Project) {
             }
 
             if (
+                normalized.contains("unable to find git executable") ||
+                normalized.contains("git executable in path") ||
+                normalized.contains("git 命令未在系统路径") ||
+                normalized.contains("git is required") ||
+                normalized.contains("git 命令")
+            ) {
+                return failureDiagnosis(
+                    category = "git_unavailable",
+                    summary = "Git could not be resolved on PATH for the IDE or gh process.",
+                    triageRoute = "local_environment",
+                    recommendedAction = "Ensure Git is installed and on PATH (or set PACVUE_GIT_PATH), then fully restart the IDE so the plugin and gh can locate the git executable.",
+                )
+            }
+
+            if (
                 normalized.contains("remote branch") ||
                 normalized.contains("not found on origin") ||
-                normalized.contains("git is required") ||
-                normalized.contains("git 命令") ||
                 normalized.contains("missing .github") ||
                 normalized.contains("no .yml") ||
                 normalized.contains("no .yaml")

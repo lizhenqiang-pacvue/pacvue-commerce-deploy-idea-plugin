@@ -123,6 +123,19 @@ class DeployServiceTest {
     }
 
     @Test
+    fun `diagnoses git executable not found as a local environment failure`() {
+        val diagnosis = DeployService.diagnoseDeployFailure(
+            issueRequest(
+                parsed = json("""{"ok":false,"dispatch":{"stderr":"unable to find git executable in PATH; please install Git for Windows before retrying"}}"""),
+                errorMessage = "Dispatch error: unable to find git executable in PATH; please install Git for Windows before retrying",
+            ),
+        )
+
+        assertEquals("git_unavailable", diagnosis.category)
+        assertEquals("local_environment", diagnosis.triageRoute)
+    }
+
+    @Test
     fun `diagnoses workflow run failures`() {
         val diagnosis = DeployService.diagnoseDeployFailure(
             issueRequest(

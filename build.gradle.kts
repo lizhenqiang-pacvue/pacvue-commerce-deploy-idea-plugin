@@ -34,12 +34,19 @@ kotlin {
     jvmToolchain(21)
 }
 
-tasks {
-    patchPluginXml {
-        sinceBuild.set("242")
-        untilBuild.set("")
+intellijPlatform {
+    pluginConfiguration {
+        ideaVersion {
+            sinceBuild.set("242")
+            // Leave until-build unset so the plugin stays compatible with all
+            // newer IDE builds. Setting it to an empty string emits an invalid
+            // `until-build=""`, which makes IDEs fail to load the descriptor.
+            untilBuild.set(provider { null })
+        }
     }
+}
 
+tasks {
     processResources {
         exclude("icons/faviconpacvue.ico")
     }

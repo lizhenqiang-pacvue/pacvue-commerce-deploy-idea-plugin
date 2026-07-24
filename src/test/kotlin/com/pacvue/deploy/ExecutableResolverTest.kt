@@ -25,6 +25,21 @@ class ExecutableResolverTest {
     }
 
     @Test
+    fun `prepends resolved tool directories onto the child process PATH`() {
+        val pathValue = ExecutableResolver.extendExecutablePath(
+            pathValue = "/usr/bin:/bin",
+            priorityDirectories = listOf("/opt/custom/git/bin", "/usr/bin"),
+        )
+
+        // The resolved git directory comes first so gh can find git via PATH, and
+        // the duplicate /usr/bin entry is collapsed rather than repeated.
+        assertEquals(
+            "/opt/custom/git/bin:/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin:/opt/local/bin",
+            pathValue,
+        )
+    }
+
+    @Test
     fun `exposes common Windows executable locations`() {
         val directories = ExecutableResolver.windowsExecutableDirectories()
 
